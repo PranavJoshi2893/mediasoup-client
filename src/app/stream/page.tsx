@@ -1,7 +1,7 @@
 'use client';
 import StreamViewer from "@/component/StreamViewer";
 import getMediaStream from "@/utils/getMediaStream";
-import { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import * as mediasoupClient from "mediasoup-client"
 
 
@@ -15,16 +15,84 @@ export default function Stream() {
     const [error, setError] = useState<string | null>(null);
     const [isPublishing, setIsPublishing] = useState(false);
 
-    const handlePublish = async () => {
+    useEffect(() => {
+        ws = new WebSocket("ws://localhost:3001/ws");
+        ws.onopen = () => {
+            console.log("WebSocket connected");
+        };
+        ws.onmessage = async (msg) => {
+            const { type, data } = JSON.parse(msg.data);
+
+            switch (type) {
+                case "routerCapabilities":
+                    await loadDevice(data);
+                    send({ type: "createProducerTransport" });
+                    break;
+
+                case "producerTransportCreated":
+                    await createTransportAndProduce(data);
+                    break;
+
+                case "producerConnected":
+                    console.log("✅ Producer connected");
+                    break;
+
+                case "produced":
+                    console.log("✅ Media track produced", data);
+                    break;
+
+                case "error":
+                    setError("❌ " + data.toString());
+                    break;
+            }
+        };
+    }, []);
+
+    const send = (data: any) => {
+        ws.send(JSON.stringify(data));
+    };
+
+    const loadDevice = async (rtpCapabilities: any) => {
+        device = new mediasoupClient.Device();
+        await device.load({ routerRtpCapabilities: rtpCapabilities });
+    };
+
+    const createTransportAndProduce = async (params: any) => {
+        const transport = device.createSendTransport(params);
+
+        transport.on("connect", ({ dtlsParameters }, callback, errback) => {
+            send({ type: "connectProducerTransport", dtlsParameters });
+            callback();
+        });
+
+        transport.on("produce", ({ kind, rtpParameters }, callback, errback) => {
+            send({ type: "produce", kind, rtpParameters });
+            callback({ id: "track-id" }); // dummy ID
+        });
+
         try {
-            const stream = await getMediaStream();
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true,
+            });
+
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
-                setIsPublishing(true);
             }
+
+            for (const track of stream.getTracks()) {
+                await transport.produce({ track });
+            }
+
+            setIsPublishing(true);
         } catch (err) {
             setError((err as Error).message);
         }
+    };
+
+
+    const handlePublish = () => {
+        send({ type: "getRouterRtpCapabilities" });
     };
 
 
